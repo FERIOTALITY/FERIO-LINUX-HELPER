@@ -1,0 +1,23 @@
+[package]
+name = "ferio-linux-helper"
+version = "0.1.0"
+edition = "2021"
+description = "A TUI-based Linux desktop configuration and troubleshooting assistant"
+authors = ["Ferio"]
+license = "MIT"
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+nix = { version = "0.27", features = ["user", "process"] }
+clap = { version = "4", features = ["derive"] }
+sysinfo = "0.30"
+chrono = "0.4"
+
+[[bin]]
+name = "ferio-linux-helper"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = true

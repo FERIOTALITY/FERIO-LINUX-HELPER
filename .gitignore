@@ -1,0 +1,24 @@
+# Rust build artifacts
+/target/
+debug/
+*.d
+
+# Cargo lock is committed for binaries
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application logs
+dry_run.log
+
+# Agent artifacts
+.agents/
