@@ -29,15 +29,26 @@
 - Rust 工具链 (rustc + cargo)
 - Linux 系统 (支持 systemd)
 
-### 编译
+### 快捷开发与构建 (Makefile)
+
+项目根目录下提供了 `Makefile`，提供了极其便利的开发快捷指令：
 
 ```bash
-cargo build --release
+make dev      # 以开发者模式运行（免 root 且开启 dry-run，最适合快速迭代界面）
+make check    # 快速检查代码语法和类型（不生成二进制，省时省力）
+make run      # 以正常特权运行（自动拉起 sudo 提权）
+make build    # 编译 Debug 版本的二进制文件
+make test     # 执行单元测试
+make watch    # 开启“保存自动重构运行”循环（需要先执行 cargo install cargo-watch）
+make clean    # 清理构建缓存
 ```
 
-### 运行
+### 手动编译与运行
 
 ```bash
+# 编译 Release 版本
+cargo build --release
+
 # 正常运行（需要 root 权限，会自动通过 sudo 提权）
 ./target/release/ferio-linux-helper
 
@@ -46,9 +57,6 @@ cargo build --release
 
 # 跳过 Root 检查（仅查看信息，无法执行系统命令）
 ./target/release/ferio-linux-helper --no-root
-
-# 组合使用
-./target/release/ferio-linux-helper --dry-run --no-root
 ```
 
 ## 快捷键
