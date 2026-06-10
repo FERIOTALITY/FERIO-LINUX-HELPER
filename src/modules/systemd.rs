@@ -53,6 +53,20 @@ impl SystemdModule {
     }
 
     fn load_services(&mut self) {
+        let mut enabled_states = std::collections::HashMap::new();
+        if let Ok(unit_files_output) = CommandExecutor::run_silent(
+            "systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null"
+        ) {
+            for line in unit_files_output.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let name = parts[0].to_string();
+                    let state = parts[1].to_string();
+                    enabled_states.insert(name, state);
+                }
+            }
+        }
+
         let output = CommandExecutor::run_silent(
             "systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null | head -100"
         );
@@ -64,10 +78,8 @@ impl SystemdModule {
                 if parts.len() >= 4 {
                     let name = parts[0].trim_start_matches('●').trim().to_string();
                     let active = parts[2].to_string();
-                    // Check enabled state
-                    let enabled = CommandExecutor::run_silent(
-                        &format!("systemctl is-enabled {} 2>/dev/null", name)
-                    ).unwrap_or_else(|_| "unknown".to_string());
+                    
+                    let enabled = enabled_states.get(&name).cloned().unwrap_or_else(|| "unknown".to_string());
 
                     self.services.push(ServiceInfo {
                         name,

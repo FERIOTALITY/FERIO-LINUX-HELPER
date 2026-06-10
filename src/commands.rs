@@ -23,6 +23,7 @@ pub struct CommandResult {
 
 /// Manages command execution with dry-run support and history tracking.
 pub struct CommandExecutor {
+    #[allow(dead_code)]
     pub dry_run: bool,
     pub history: Vec<String>,
     pub last_result: Option<CommandResult>,
@@ -37,12 +38,10 @@ impl CommandExecutor {
         }
     }
 
-    /// Executes a command. In dry-run mode, logs to dry_run.log and returns mock success.
-    pub fn execute(&mut self, cmd: &CommandToExecute) -> Result<String, String> {
+    /// Executes a command statically. Useful for running in background threads.
+    pub fn execute_static(dry_run: bool, cmd: &CommandToExecute) -> Result<String, String> {
         let cmd_str = &cmd.command_string;
-        self.history.push(cmd_str.clone());
-
-        if self.dry_run {
+        if dry_run {
             // Log to file
             if let Ok(mut file) = OpenOptions::new()
                 .create(true)
@@ -52,10 +51,6 @@ impl CommandExecutor {
                 let _ = writeln!(file, "[DRY-RUN] {}: {}", cmd.display_name, cmd_str);
             }
             let msg = format!("[DRY-RUN] Would execute: {}", cmd_str);
-            self.last_result = Some(CommandResult {
-                success: true,
-                output: msg.clone(),
-            });
             Ok(msg)
         } else {
             if cmd_str.trim().is_empty() {
@@ -66,39 +61,47 @@ impl CommandExecutor {
                     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                     if output.status.success() {
-                        let result = if stdout.is_empty() {
-                            "Command completed successfully.".to_string()
+                        if stdout.is_empty() {
+                            Ok("Command completed successfully.".to_string())
                         } else {
-                            stdout.clone()
-                        };
-                        self.last_result = Some(CommandResult {
-                            success: true,
-                            output: result.clone(),
-                        });
-                        Ok(result)
+                            Ok(stdout)
+                        }
                     } else {
                         let err_msg = if stderr.is_empty() {
                             format!("Command failed with exit code: {}", output.status)
                         } else {
-                            stderr.clone()
+                            stderr
                         };
-                        self.last_result = Some(CommandResult {
-                            success: false,
-                            output: err_msg.clone(),
-                        });
                         Err(err_msg)
                     }
                 }
                 Err(e) => {
-                    let err_msg = format!("Failed to spawn command: {}", e);
-                    self.last_result = Some(CommandResult {
-                        success: false,
-                        output: err_msg.clone(),
-                    });
-                    Err(err_msg)
+                    Err(format!("Failed to spawn command: {}", e))
                 }
             }
         }
+    }
+
+    /// Executes a command. In dry-run mode, logs to dry_run.log and returns mock success.
+    #[allow(dead_code)]
+    pub fn execute(&mut self, cmd: &CommandToExecute) -> Result<String, String> {
+        self.history.push(cmd.command_string.clone());
+        let res = Self::execute_static(self.dry_run, cmd);
+        match &res {
+            Ok(msg) => {
+                self.last_result = Some(CommandResult {
+                    success: true,
+                    output: msg.clone(),
+                });
+            }
+            Err(err) => {
+                self.last_result = Some(CommandResult {
+                    success: false,
+                    output: err.clone(),
+                });
+            }
+        }
+        res
     }
 
     /// Run a command silently and return its stdout (used for data gathering, not user actions).

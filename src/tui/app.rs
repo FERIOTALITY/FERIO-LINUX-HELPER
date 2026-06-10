@@ -16,6 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
+use std::sync::mpsc;
+use std::thread;
+
 const TAB_TITLES: [&str; 7] = [
     "1·系统信息",
     "2·软件包",
@@ -25,6 +28,16 @@ const TAB_TITLES: [&str; 7] = [
     "6·日志",
     "7·优化",
 ];
+
+pub enum CommandExecutionState {
+    Idle,
+    Running {
+        display_name: String,
+        command_string: String,
+        rx: mpsc::Receiver<Result<String, String>>,
+        start_time: std::time::Instant,
+    },
+}
 
 pub struct App {
     pub active_tab: usize,
@@ -38,6 +51,15 @@ pub struct App {
     pub executor: CommandExecutor,
     pub modal_active: bool,
     pub pending_command: Option<CommandToExecute>,
+    
+    // New fields for async execution & results modal
+    pub execution_state: CommandExecutionState,
+    pub result_modal_active: bool,
+    pub executed_command_name: String,
+    pub executed_command_result: String,
+    pub executed_command_success: bool,
+    pub result_scroll_offset: usize,
+
     pub status_message: String,
     pub should_quit: bool,
     dry_run: bool,
@@ -57,6 +79,12 @@ impl App {
             executor: CommandExecutor::new(dry_run),
             modal_active: false,
             pending_command: None,
+            execution_state: CommandExecutionState::Idle,
+            result_modal_active: false,
+            executed_command_name: String::new(),
+            executed_command_result: String::new(),
+            executed_command_success: false,
+            result_scroll_offset: 0,
             status_message: if dry_run {
                 "模式: DRY-RUN (命令不会实际执行)".to_string()
             } else {
@@ -82,29 +110,67 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
+        // If a command is running, ignore all inputs
+        if let CommandExecutionState::Running { .. } = self.execution_state {
+            return;
+        }
+
+        // Result modal intercept
+        if self.result_modal_active {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('y') | KeyCode::Char('n') => {
+                    self.result_modal_active = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.result_scroll_offset > 0 {
+                        self.result_scroll_offset -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let lines_count = self.executed_command_result.lines().count();
+                    if self.result_scroll_offset < lines_count.saturating_sub(1) {
+                        self.result_scroll_offset += 1;
+                    }
+                }
+                KeyCode::PageUp => {
+                    self.result_scroll_offset = self.result_scroll_offset.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    let lines_count = self.executed_command_result.lines().count();
+                    self.result_scroll_offset = std::cmp::min(
+                        self.result_scroll_offset + 10,
+                        lines_count.saturating_sub(1),
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Modal intercept
         if self.modal_active {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     if let Some(cmd) = self.pending_command.take() {
-                        match self.executor.execute(&cmd) {
-                            Ok(msg) => {
-                                self.status_message = if msg.len() > 80 {
-                                    format!("{}...", &msg[..77])
-                                } else {
-                                    msg
-                                };
-                            }
-                            Err(err) => {
-                                self.status_message = format!("✗ {}", if err.len() > 75 {
-                                    format!("{}...", &err[..72])
-                                } else {
-                                    err
-                                });
-                            }
-                        }
-                        // Refresh module data after command execution
-                        self.refresh_active_module();
+                        self.executor.history.push(cmd.command_string.clone());
+                        
+                        let dry_run = self.dry_run;
+                        let cmd_clone = cmd.clone();
+                        let (tx, rx) = mpsc::channel();
+                        
+                        self.status_message = format!("正在执行: {}...", cmd.display_name);
+                        
+                        thread::spawn(move || {
+                            let res = CommandExecutor::execute_static(dry_run, &cmd_clone);
+                            let _ = tx.send(res);
+                        });
+                        
+                        self.execution_state = CommandExecutionState::Running {
+                            display_name: cmd.display_name,
+                            command_string: cmd.command_string,
+                            rx,
+                            start_time: std::time::Instant::now(),
+                        };
                     }
                     self.modal_active = false;
                 }
@@ -165,7 +231,36 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        // Periodic background updates can be added here
+        let mut completed_result = None;
+        if let CommandExecutionState::Running { ref display_name, ref rx, .. } = self.execution_state {
+            if let Ok(res) = rx.try_recv() {
+                completed_result = Some((display_name.clone(), res));
+            }
+        }
+
+        if let Some((name, res)) = completed_result {
+            let (success, output) = match res {
+                Ok(out) => (true, out),
+                Err(err) => (false, err),
+            };
+            
+            self.executed_command_name = name.clone();
+            self.executed_command_result = output;
+            self.executed_command_success = success;
+            self.result_scroll_offset = 0;
+            self.result_modal_active = true;
+            
+            self.executor.last_result = Some(crate::commands::CommandResult {
+                success,
+                output: self.executed_command_result.clone(),
+            });
+            
+            self.execution_state = CommandExecutionState::Idle;
+            self.status_message = format!("就绪 - 上次操作: {}", name);
+            
+            // Refresh data
+            self.refresh_active_module();
+        }
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -225,11 +320,15 @@ impl App {
         }
 
         // Status bar
-        let mode_indicator = if self.dry_run { " [DRY-RUN] " } else { "" };
-        let status_text = format!(
-            " {}{}  │  ←→/Tab 切换  │  ↑↓ 选择  │  Enter 确认  │  Esc/q 退出",
-            mode_indicator, self.status_message
-        );
+        let status_text = if self.result_modal_active {
+            "  ↑↓/PgUp/PgDn 滚动查看结果  │  Enter/Esc/q 关闭弹窗  │  ferio-linux-helper".to_string()
+        } else {
+            let mode_indicator = if self.dry_run { " [DRY-RUN] " } else { "" };
+            format!(
+                " {}{}  │  ←→/Tab 切换  │  ↑↓ 选择  │  Enter 确认  │  Esc/q 退出",
+                mode_indicator, self.status_message
+            )
+        };
         let status = Paragraph::new(status_text)
             .style(Style::default().fg(Color::White))
             .block(
@@ -294,6 +393,107 @@ impl App {
                     .wrap(Wrap { trim: false });
                 frame.render_widget(modal_paragraph, modal_area);
             }
+        }
+
+        // Running modal overlay
+        if let CommandExecutionState::Running { ref display_name, ref command_string, ref start_time, .. } = self.execution_state {
+            let modal_area = centered_rect(65, 30, size);
+            frame.render_widget(Clear, modal_area);
+
+            let elapsed = start_time.elapsed().as_secs();
+            let spinner = match elapsed % 4 {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                _ => "⠸",
+            };
+
+            let modal_block = Block::default()
+                .title(" ⏳ 正在执行 ")
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan));
+
+            let lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(format!("  {} ", spinner), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("操作: {}", display_name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  命令: ", Style::default().fg(Color::Gray)),
+                    Span::styled(command_string.clone(), Style::default().fg(Color::Green)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  已耗时: {} 秒", elapsed),
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  系统正在后台执行此操作，请稍候...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+
+            let modal_paragraph = Paragraph::new(lines)
+                .block(modal_block)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(modal_paragraph, modal_area);
+        }
+
+        // Result modal overlay
+        if self.result_modal_active {
+            let modal_area = centered_rect(80, 75, size);
+            frame.render_widget(Clear, modal_area);
+
+            let title_color = if self.executed_command_success { Color::Green } else { Color::Red };
+            let title_icon = if self.executed_command_success { " ✔ " } else { " ✗ " };
+
+            // Scrollable output content
+            let lines: Vec<&str> = self.executed_command_result.lines().collect();
+            let visible_height = modal_area.height.saturating_sub(4) as usize;
+
+            let start = self.result_scroll_offset;
+            let end = std::cmp::min(start + visible_height, lines.len());
+
+            let mut display_lines = Vec::new();
+            for i in start..end {
+                let l = lines[i];
+                let style = if l.to_lowercase().contains("error") || l.to_lowercase().contains("failed") {
+                    Style::default().fg(Color::Red)
+                } else if l.to_lowercase().contains("warn") {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                display_lines.push(Line::from(Span::styled(l.to_string(), style)));
+            }
+
+            if display_lines.is_empty() {
+                display_lines.push(Line::from("  （无输出内容）"));
+            }
+
+            let title = format!(
+                "{} 执行结果: {} [行 {}-{}/共 {} 行] ",
+                title_icon,
+                self.executed_command_name,
+                if lines.is_empty() { 0 } else { start + 1 },
+                end,
+                lines.len()
+            );
+
+            let modal_block = Block::default()
+                .title(title)
+                .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(title_color));
+
+            let modal_paragraph = Paragraph::new(display_lines)
+                .block(modal_block)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(modal_paragraph, modal_area);
         }
     }
 }
